@@ -94,6 +94,13 @@ def get_classifications(include_missed: bool = False):
                 ON (elasticc_diaobject."diaObjectId" = elasticc_diaobjecttruth."diaObjectId")
             INNER JOIN elasticc_gentypeofclassid
                 ON (elasticc_diaobjecttruth."gentype" = elasticc_gentypeofclassid."gentype")
+            INNER JOIN (
+                SELECT DISTINCT ON ("diaObjectId")
+                "diaObjectId", "alertId", "diaSourceId", "alertSentTimestamp"
+                    FROM elasticc_diaalert
+                    ORDER BY "diaObjectId", "alertSentTimestamp" DESC NULLS LAST
+                ) last_sent_alert
+                ON (elasticc_diaobject."diaObjectId" = last_sent_alert."diaObjectId")
             CROSS JOIN elasticc_brokerclassifier
             {last_best_join_type} JOIN (
                 SELECT
@@ -129,6 +136,7 @@ def get_classifications(include_missed: bool = False):
                         elasticc_diaobject."diaObjectId" = last_best."diaObjectId"
                         AND elasticc_brokerclassifier."classifierId" = last_best."classifierId"
                     )
+            WHERE last_sent_alert."alertSentTimestamp" IS NOT NULL
             GROUP BY pred_class, true_class, classifier_index
     '''
     result = rqs.post( f'{url}/db/runsqlquery/',
