@@ -89,19 +89,30 @@ def get_classifications(include_missed: bool = False):
         max(last_best."probability") AS max_probability,
         min(last_best."probability") AS min_probability,
         count(*) AS n
+            -- Main diaObject table
             FROM elasticc_diaobject
+            -- This table has the true class labels
             INNER JOIN elasticc_diaobjecttruth
                 ON (elasticc_diaobject."diaObjectId" = elasticc_diaobjecttruth."diaObjectId")
+            -- Match true class label to Elasticc Taxonomy classes
             INNER JOIN elasticc_gentypeofclassid
                 ON (elasticc_diaobjecttruth."gentype" = elasticc_gentypeofclassid."gentype")
+            -- Get the last sent alert for a given object, alertSentTimestamp IS NULL if no alerts have been sent yet
             INNER JOIN (
                 SELECT DISTINCT ON ("diaObjectId")
                 "diaObjectId", "alertId", "diaSourceId", "alertSentTimestamp"
                     FROM elasticc_diaalert
+                    -- DESC NULLS LAST should give the last sent alert if any have been sent
+                    -- It gives some non-sent alert in the opposite case
                     ORDER BY "diaObjectId", "alertSentTimestamp" DESC NULLS LAST
                 ) last_sent_alert
                 ON (elasticc_diaobject."diaObjectId" = last_sent_alert."diaObjectId")
+            -- We'd like to consider all possible pairs of diaObject and classifierId
             CROSS JOIN elasticc_brokerclassifier
+            -- Get the most resent best (having the largest probability) classification for each matched objectId - classifierId pair
+            -- This is configurable to be either INNER or LEFT join:
+            --   - INNER gives all objects classified by a given classifier
+            --   - LEFT gives the same plus objectts which have never been reported back by the classifier, last_best columns are NULL for them
             {last_best_join_type} JOIN (
                 SELECT
                 last_broker_message."diaObjectId",
@@ -109,6 +120,7 @@ def get_classifications(include_missed: bool = False):
                 best_classification."classId",
                 best_classification."probability"
                 FROM (
+                    -- Get the most recent broker message for each diaObjectId
                     SELECT DISTINCT ON (elasticc_brokerclassification."classifierId", elasticc_diaalert."diaObjectId")
                     "diaObjectId",
                     elasticc_brokerclassification."brokerMessageId"
@@ -119,7 +131,8 @@ def get_classifications(include_missed: bool = False):
                             ON (elasticc_brokerclassification."brokerMessageId" = elasticc_brokermessage."brokerMessageId")
                         ORDER BY elasticc_brokerclassification."classifierId", elasticc_diaalert."diaObjectId", "elasticcPublishTimestamp" DESC
                     ) last_broker_message
-                    INNER JOIN ( 
+                    INNER JOIN (
+                        -- Get the best classification (having highest probability) for each message from last_broker_message
                         SELECT DISTINCT ON (elasticc_brokerclassification."brokerMessageId")
                         elasticc_brokerclassification."classId",
                         elasticc_brokerclassification."probability",
@@ -136,7 +149,9 @@ def get_classifications(include_missed: bool = False):
                         elasticc_diaobject."diaObjectId" = last_best."diaObjectId"
                         AND elasticc_brokerclassifier."classifierId" = last_best."classifierId"
                     )
+            -- Filter out objects that have never been sent to brokers
             WHERE last_sent_alert."alertSentTimestamp" IS NOT NULL
+            -- Aggregate confusion matrices
             GROUP BY pred_class, true_class, classifier_index
     '''
     result = rqs.post( f'{url}/db/runsqlquery/',
