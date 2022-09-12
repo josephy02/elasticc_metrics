@@ -74,20 +74,34 @@ def get_classifications(include_missed: bool = False):
     #  Postgres converts things to lc for some reason or another.
 
     if include_missed:
-        last_best_join_type = 'LEFT'
+        best_last_join_type = 'LEFT'
+        join_alert_sent_time = '''
+            INNER JOIN (
+                SELECT DISTINCT ON ("diaObjectId")
+                "diaObjectId", "alertId", "diaSourceId", "alertSentTimestamp"
+                    FROM elasticc_diaalert
+                    -- DESC NULLS LAST should give the last sent alert if any have been sent
+                    -- It gives some non-sent alert in the opposite case
+                    ORDER BY "diaObjectId", "alertSentTimestamp" DESC NULLS LAST
+                ) last_sent_alert
+                ON (elasticc_diaobject."diaObjectId" = last_sent_alert."diaObjectId")
+        '''
+        where = 'WHERE last_sent_alert."alertSentTimestamp" IS NOT NULL'
     else:
-        last_best_join_type = 'INNER'
+        best_last_join_type = 'INNER'
+        join_alert_sent_time = ''
+        where = ''
 
     query = f'''
         SELECT
-        last_best."classId" AS pred_class,
+        best_last_classification."classId" AS pred_class,
         elasticc_gentypeofclassid."classId" AS true_class,
         elasticc_brokerclassifier."classifierId" as classifier_index,
         elasticc_brokerclassifier."brokerName" as broker_name,
         elasticc_brokerclassifier."classifierName" as classifier_name,
-        avg(last_best."probability") AS mean_probability,
-        max(last_best."probability") AS max_probability,
-        min(last_best."probability") AS min_probability,
+        avg(best_last_classification."probability") AS mean_probability,
+        max(best_last_classification."probability") AS max_probability,
+        min(best_last_classification."probability") AS min_probability,
         count(*) AS n
             -- Main diaObject table
             FROM elasticc_diaobject
@@ -98,59 +112,25 @@ def get_classifications(include_missed: bool = False):
             INNER JOIN elasticc_gentypeofclassid
                 ON (elasticc_diaobjecttruth."gentype" = elasticc_gentypeofclassid."gentype")
             -- Get the last sent alert for a given object, alertSentTimestamp IS NULL if no alerts have been sent yet
-            INNER JOIN (
-                SELECT DISTINCT ON ("diaObjectId")
-                "diaObjectId", "alertId", "diaSourceId", "alertSentTimestamp"
-                    FROM elasticc_diaalert
-                    -- DESC NULLS LAST should give the last sent alert if any have been sent
-                    -- It gives some non-sent alert in the opposite case
-                    ORDER BY "diaObjectId", "alertSentTimestamp" DESC NULLS LAST
-                ) last_sent_alert
-                ON (elasticc_diaobject."diaObjectId" = last_sent_alert."diaObjectId")
+            {join_alert_sent_time}
             -- We'd like to consider all possible pairs of diaObject and classifierId
             CROSS JOIN elasticc_brokerclassifier
             -- Get the most resent best (having the largest probability) classification for each matched objectId - classifierId pair
             -- This is configurable to be either INNER or LEFT join:
             --   - INNER gives all objects classified by a given classifier
             --   - LEFT gives the same plus objectts which have never been reported back by the classifier, last_best columns are NULL for them
-            {last_best_join_type} JOIN (
-                SELECT
-                last_broker_message."diaObjectId",
-                best_classification."classifierId",
-                best_classification."classId",
-                best_classification."probability"
-                FROM (
-                    -- Get the most recent broker message for each diaObjectId
-                    SELECT DISTINCT ON (elasticc_brokerclassification."classifierId", elasticc_diaalert."diaObjectId")
-                    "diaObjectId",
-                    elasticc_brokerclassification."brokerMessageId"
-                        FROM elasticc_brokermessage
-                        INNER JOIN elasticc_diaalert
-                            ON (elasticc_brokermessage."alertId" = elasticc_diaalert."alertId")
-                        INNER JOIN elasticc_brokerclassification
-                            ON (elasticc_brokerclassification."brokerMessageId" = elasticc_brokermessage."brokerMessageId")
-                        ORDER BY elasticc_brokerclassification."classifierId", elasticc_diaalert."diaObjectId", "elasticcPublishTimestamp" DESC
-                    ) last_broker_message
-                    INNER JOIN (
-                        -- Get the best classification (having highest probability) for each message from last_broker_message
-                        SELECT DISTINCT ON (elasticc_brokerclassification."brokerMessageId")
-                        elasticc_brokerclassification."classId",
-                        elasticc_brokerclassification."probability",
-                        elasticc_brokerclassification."brokerMessageId",
-                        elasticc_brokerclassifier."classifierId"
-                            FROM elasticc_brokerclassification
-                            INNER JOIN elasticc_brokerclassifier
-                                USING ("classifierId")
-                            ORDER BY elasticc_brokerclassification."brokerMessageId", elasticc_brokerclassification."probability" DESC
-                        ) best_classification
-                        ON (last_broker_message."brokerMessageId" = best_classification."brokerMessageId")
-                ) last_best
-                    ON (
-                        elasticc_diaobject."diaObjectId" = last_best."diaObjectId"
-                        AND elasticc_brokerclassifier."classifierId" = last_best."classifierId"
-                    )
+            {best_last_join_type} JOIN (
+                SELECT DISTINCT ON ("diaObjectId", "classifierId")
+                    "classifierId", "diaObjectId", "classId", "probability"
+                    FROM elasticc_view_sourceclassifications
+                    ORDER BY "diaObjectId", "classifierId", "alertSentTimestamp", "probability" DESC
+                ) best_last_classification
+                ON (
+                    elasticc_diaobject."diaObjectId" = best_last_classification."diaObjectId"
+                    AND elasticc_brokerclassifier."classifierId" = best_last_classification."classifierId"
+                )
             -- Filter out objects that have never been sent to brokers
-            WHERE last_sent_alert."alertSentTimestamp" IS NOT NULL
+            {where}
             -- Aggregate confusion matrices
             GROUP BY pred_class, true_class, classifier_index
     '''
