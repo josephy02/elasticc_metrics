@@ -118,7 +118,7 @@ def get_classifications(include_missed: bool = False):
             -- Get the most resent best (having the largest probability) classification for each matched objectId - classifierId pair
             -- This is configurable to be either INNER or LEFT join:
             --   - INNER gives all objects classified by a given classifier
-            --   - LEFT gives the same plus objectts which have never been reported back by the classifier, last_best columns are NULL for them
+            --   - LEFT gives the same plus objectts which have never been reported back by the classifier, best_last_classification columns are NULL for them
             {best_last_join_type} JOIN (
                 SELECT DISTINCT ON ("diaObjectId", "classifierId")
                     "classifierId", "diaObjectId", "classId", "probability"
