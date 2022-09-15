@@ -1,11 +1,52 @@
 import argparse
-import sys
+import logging
 import os
-import json
-from pprint import pprint
+from pprint import pformat
+from typing import Dict, List
 
+import numpy as np
 import pandas as pd
 import requests
+
+
+TAXONOMY = {
+    -1: 'missed',
+    0: 'Static/Other',
+    1: 'Non-Recurring',
+    2: 'Recurring',
+    20: 'Recurring/Other',
+    21: 'Periodic',
+    22: 'Non-Periodic',
+    210: 'Periodic/Other',
+    211: 'Cepheid',
+    212: 'RR Lyrae',
+    213: 'Delta Scuti',
+    214: 'EB',
+    215: 'LPV/Mira',
+    220: 'Non-Periodic/Other',
+    221: 'AGN',
+    10: 'Non-Recurring/Other',
+    11: 'SN-like',
+    12: 'Fast',
+    13: 'Long',
+    110: 'SN-like/Other',
+    111: 'Ia',
+    112: 'Ib/c',
+    113: 'II',
+    114: 'Iax',
+    115: '91bg',
+    120: 'Fast/Other',
+    121: 'KN',
+    122: 'M-dwarf Flare',
+    123: 'Dwarf Novae',
+    124: 'uLens',
+    130: 'Long/Other',
+    131: 'SLSN',
+    132: 'TDE',
+    133: 'ILOT',
+    134: 'CART',
+    135: 'PISN',
+}
 
 
 def parse_args(args=None):
@@ -16,168 +57,189 @@ def parse_args(args=None):
     parser.add_argument('--include-missed', action='store_true', help='Add missed classifications as a predicted class')
     parser.add_argument('--plot', action='store_true', help='Plot and save confusion matrices')
     parser.add_argument('--save', action='store_true', help='Save CSV with data')
+    parser.add_argument('--norm', default='true', choices=['true', 'pred', 'all'],
+                        help='how t onormalize confusion matrices')
+    parser.add_argument('--definition', default='last_best', choices=['last_best', 'best'],
+                        help='''definition of classification:
+                            "best" means having the largest probability over all classifier messages,
+                            "last_best" means having the largest probability for the most recent alert
+                        ''')
     return parser.parse_args(args)
 
 
-def get_classifications(include_missed: bool = False):
-    # Put in your TOM username and password here.  What I have here
-    # reads the password from a private directory, so this code will not
-    # work as is for you.  You just need to set the username and
-    # password variables for use in the rqs.post call below.
-    
+class Client:
     url = "https://desc-tom.lbl.gov"
+
+    def __init__(self, session: requests.Session):
+        self.session = session
+
+    @classmethod
+    def from_credentials(cls, user, password):
+        session = requests.session()
+        session.get(f'{cls.url}/accounts/login/')
+        res = session.post(
+            f'{cls.url}/accounts/login/',
+            data={
+                "username": user,
+                "password": password,
+                "csrfmiddlewaretoken": session.cookies['csrftoken']
+            },
+        )
+        if res.status_code != 200:
+            raise RuntimeError(f"Failed to log in; http status: {res.status_code}")
+        if 'Please enter a correct' in res.text:
+            # This is a very cheesy attempt at checking if the login failed.
+            # I haven't found clean documentation on how to log into a django site
+            # from an app like this using standard authentication stuff.  So, for
+            # now, I'm counting on the HTML that happened to come back when
+            # I ran it with a failed login one time.  One of these days I'll actually
+            # figure out how Django auth works and make a version of /accounts/login/
+            # designed for use in API scripts like this one, rather than desgined
+            # for interactive users.
+            raise RuntimeError("Failed to log in.  I think.  Put in a debug break and look at res.text")
+        session.headers['X-CSRFToken'] = session.cookies['csrftoken']
+        return cls(session)
+
+    def __call__(self, query: str) -> List[Dict]:
+        result = self.session.post(f'{self.url}/db/runsqlquery/', json={'query': query, 'subdict': {}})
+        result.raise_for_status()
+        data = result.json()
+        if ('status' not in data) or (data['status'] != 'ok'):
+            raise RuntimeError(f"Got unexpected response:\n{data}\n")
+        return data['rows']
+
+
+def get_classifications(definition: str, include_missed: bool = False) -> Dict[str, pd.DataFrame]:
     username = "kostya"
+    password = os.getenv("DESC_TOM_PASSWORD")
+    client = Client.from_credentials(username, password)
 
-    # First, log in.  Because of Django's prevention against cross-site
-    # scripting attacks, there is some dancing about you have to do in
-    # order to make sure it always gets the right "csrftoken" header.
-
-    rqs = requests.session()
-    rqs.get( f'{url}/accounts/login/' )
-    res = rqs.post( f'{url}/accounts/login/',
-                    data={ "username": username,
-                           "password": os.getenv("DESC_TOM_PASSWORD"),
-                           "csrfmiddlewaretoken": rqs.cookies['csrftoken'] } )
-    if res.status_code != 200:
-        raise RuntimeError( f"Failed to log in; http status: {res.status_code}" )
-    if 'Please enter a correct' in res.text:
-        # This is a very cheesy attempt at checking if the login failed.
-        # I haven't found clean documentation on how to log into a django site
-        # from an app like this using standard authentication stuff.  So, for
-        # now, I'm counting on the HTML that happened to come back when
-        # I ran it with a failed login one time.  One of these days I'll actually
-        # figure out how Django auth works and make a version of /accounts/login/
-        # designed for use in API scripts like this one, rather than desgined
-        # for interactive users.
-        raise RuntimeError( "Failed to log in.  I think.  Put in a debug break and look at res.text" )
-    rqs.headers.update( { 'X-CSRFToken': rqs.cookies['csrftoken'] } )
-
-    # Next, send your query, passing the csrfheader with each request.
-    # (The rqs.headers.update call above makes that happen if you just
-    # keep using the rqs object.)
-    #
-    # You send the query as a json-encoded dictionary with two fields:
-    #   'query' : the SQL query, with %(name)s for things that should
-    #                be substituted.  (This is standard psycopg2.)
-    #   'subdict' : a dictionary of substitutions for %(name)s things in your query
-    #
-    # The backend is to this web API call is readonly, so you can't
-    # bobby tables this.  However, this does give you the freedom to
-    # read anything from the tables if you know the schema.
-    #
-    # At some point in the near future, elasticc truth tables will be restricted
-    # to elasticc admins.
-    #
-    # (Some relevant schema are at the bottom.brokerMessageId)
-    
-    # Note that I have to double-quote the column name beacuse otherwise
-    #  Postgres converts things to lc for some reason or another.
+    query = f'''
+        SELECT * FROM elasticc_brokerclassifier ORDER BY "brokerName", "brokerVersion", "classifierName", "classifierId"
+    '''
+    data = client(query)
+    logging.info(pformat(data))
+    classifiers = {row['classifierId']: f'{row["brokerName"]} {row["brokerVersion"]} {row["classifierName"]}'
+                   for row in data}
 
     if include_missed:
         best_last_join_type = 'LEFT'
-        join_alert_sent_time = '''
+        join_object_sent = '''
             INNER JOIN (
-                SELECT DISTINCT ON ("diaObjectId")
-                "diaObjectId", "alertId", "diaSourceId", "alertSentTimestamp"
+                SELECT
+                "diaObjectId", bool_or("alertSentTimestamp" IS NOT NULL) AS "is_sent"
                     FROM elasticc_diaalert
-                    -- DESC NULLS LAST should give the last sent alert if any have been sent
-                    -- It gives some non-sent alert in the opposite case
-                    ORDER BY "diaObjectId", "alertSentTimestamp" DESC NULLS LAST
-                ) last_sent_alert
-                ON (elasticc_diaobject."diaObjectId" = last_sent_alert."diaObjectId")
-        '''
-        where = 'WHERE last_sent_alert."alertSentTimestamp" IS NOT NULL'
+                    GROUP BY "diaObjectId" 
+                ) object_sent_record
+                    ON (elasticc_diaobjecttruth."diaObjectId" = object_sent_record."diaObjectId")
+                '''
+        where = 'WHERE object_sent_record."is_sent"'
     else:
         best_last_join_type = 'INNER'
-        join_alert_sent_time = ''
+        join_object_sent = ''
         where = ''
 
-    query = f'''
-        SELECT
-        best_last_classification."classId" AS pred_class,
-        elasticc_gentypeofclassid."classId" AS true_class,
-        elasticc_brokerclassifier."classifierId" as classifier_index,
-        elasticc_brokerclassifier."brokerName" as broker_name,
-        elasticc_brokerclassifier."classifierName" as classifier_name,
-        avg(best_last_classification."probability") AS mean_probability,
-        max(best_last_classification."probability") AS max_probability,
-        min(best_last_classification."probability") AS min_probability,
-        count(*) AS n
-            -- Main diaObject table
-            FROM elasticc_diaobject
-            -- This table has the true class labels
-            INNER JOIN elasticc_diaobjecttruth
-                ON (elasticc_diaobject."diaObjectId" = elasticc_diaobjecttruth."diaObjectId")
-            -- Match true class label to Elasticc Taxonomy classes
+    if definition == 'last_best':
+        distinct_order = 'elasticc_diaalert."alertSentTimestamp", elasticc_brokerclassification."probability"'
+    elif definition == 'best':
+        # I think we need additional sorting over alertSentTimestamp to get the deterministic result for the case of
+        # equal probabilities (I've seen prob of 1.0)
+        distinct_order = 'elasticc_brokerclassification."probability", elasticc_diaalert."alertSentTimestamp"'
+    else:
+        raise ValueError(f'Unknown classification definition: {definition}')
+
+    dfs = {}
+    for classifier_id, classifier_name in classifiers.items():
+        logging.info(f'Getting classifications for {classifier_name}')
+        query = f'''
+            SELECT best_last."classId" AS pred_class,
+                   elasticc_gentypeofclassid."classId" AS true_class,
+                   COUNT(*) AS n
+            FROM elasticc_diaobjecttruth
             INNER JOIN elasticc_gentypeofclassid
-                ON (elasticc_diaobjecttruth."gentype" = elasticc_gentypeofclassid."gentype")
-            -- Get the last sent alert for a given object, alertSentTimestamp IS NULL if no alerts have been sent yet
-            {join_alert_sent_time}
-            -- We'd like to consider all possible pairs of diaObject and classifierId
-            CROSS JOIN elasticc_brokerclassifier
-            -- Get the most resent best (having the largest probability) classification for each matched objectId - classifierId pair
-            -- This is configurable to be either INNER or LEFT join:
-            --   - INNER gives all objects classified by a given classifier
-            --   - LEFT gives the same plus objectts which have never been reported back by the classifier, best_last_classification columns are NULL for them
-            {best_last_join_type} JOIN (
-                SELECT DISTINCT ON ("diaObjectId", "classifierId")
-                    "classifierId", "diaObjectId", "classId", "probability"
-                    FROM elasticc_view_sourceclassifications
-                    ORDER BY "diaObjectId", "classifierId", "alertSentTimestamp", "probability" DESC
-                ) best_last_classification
-                ON (
-                    elasticc_diaobject."diaObjectId" = best_last_classification."diaObjectId"
-                    AND elasticc_brokerclassifier."classifierId" = best_last_classification."classifierId"
-                )
-            -- Filter out objects that have never been sent to brokers
+                ON (elasticc_diaobjecttruth.gentype = elasticc_gentypeofclassid.gentype)
+            {join_object_sent}
+            {best_last_join_type} JOIN
+            (
+               SELECT DISTINCT ON (elasticc_diaalert."diaObjectId")
+                  elasticc_brokerclassification."classId", elasticc_brokerclassification."probability", elasticc_diaalert."diaObjectId"
+               FROM elasticc_brokerclassification
+               INNER JOIN elasticc_brokermessage
+                  ON elasticc_brokerclassification."brokerMessageId"=elasticc_brokermessage."brokerMessageId"
+               INNER JOIN elasticc_diaalert
+                  ON elasticc_brokermessage."alertId"=elasticc_diaalert."alertId"
+               WHERE elasticc_brokerclassification."classifierId"={classifier_id}
+               ORDER BY elasticc_diaalert."diaObjectId", {distinct_order} DESC
+            ) best_last
+            ON (best_last."diaObjectId" = elasticc_diaobjecttruth."diaObjectId")
             {where}
-            -- Aggregate confusion matrices
-            GROUP BY pred_class, true_class, classifier_index
-    '''
-    result = rqs.post( f'{url}/db/runsqlquery/',
-                       json={ 'query': query, 'subdict': {} } )
+            GROUP BY pred_class, true_class
+            ORDER BY pred_class, true_class
+        '''
+        data = client(query)
+        logging.info(pformat(data))
+        if len(data) == 0:
+            logging.warning(f'No data for {classifier_name}')
+            continue
+        df = pd.DataFrame.from_records(data)
+        df['classifier_id'] = classifier_id
+        df['classifier_name'] = classifier_name
+        df['pred_class'] = df['pred_class'].fillna(-1).astype(int)
+        dfs[classifier_id] = df
 
-    # Look at the response.  It will be a JSON encoded dict with two fields:
-    #  { 'status': 'ok',
-    #    'rows': [...] }
-    # where rows has the rows returned by the SQL query; each element of the row
-    # is a dict.  There's probably a more efficient way to return this.  I'll
-    # add formatting parameters later -- for instance, it might be nice to be able
-    # to get a serialized pandas DataFrame, which then skips the binary-to-text-to-binary
-    # translation that going through JSON will do.
-
-    if result.status_code != 200:
-        sys.stderr.write( f"ERROR: got status code {result.status_code} ({result.reason})\n" )
-        return
-    data = json.loads( result.text )
-    if ( 'status' not in data ) or ( data['status'] != 'ok' ):
-        sys.stderr.write( f"Got unexpected response:\n{data}\n" )
-        return
-    pprint(data['rows'])
-
-    df = pd.DataFrame.from_records(data['rows'])
-    # Replace missed classification with -1 label
-    df['pred_class'] = df['pred_class'].fillna(-1).astype(int)
-
-    return df
+    return dfs
 
 
-def plot_matrix(matrix):
+def _conf_annotation(count: int, fraction: float) -> str:
+    percent = np.round(fraction * 100)
+    if count < 1_000_000:
+        count_str = str(count)
+    else:
+        count_str = f'{count:.3g}'
+    return f'{percent}%\n{count_str}'
+
+
+conf_annotation = np.vectorize(_conf_annotation)
+
+
+def plot_matrix(matrix: pd.DataFrame, *, norm: str):
     import matplotlib.pyplot as plt
-    from sklearn.metrics import ConfusionMatrixDisplay
+    import seaborn as sns
+    from matplotlib.patches import Rectangle
+    from sklearn.metrics import confusion_matrix
 
-    plt.figure(figsize=(15, 15))
-    row = matrix.iloc[0]
-    name = f'{row["broker_name"]} {row["classifier_name"]}'
-    cmd = ConfusionMatrixDisplay.from_predictions(
+    plt.figure(figsize=(20, 20))
+    plt.gca().set_aspect(
+        # aspect=len(np.unique(matrix['true_class'])) / len(np.unique(matrix['pred_class'])),
+        aspect='equal',
+        adjustable='box',
+    )
+    name = matrix.iloc[0]['classifier_name']
+    counts = confusion_matrix(
         y_true=matrix['true_class'],
         y_pred=matrix['pred_class'],
         sample_weight=matrix['n'],
-        normalize='true',
-        ax=plt.gca(),
-        cmap='Blues',
+        normalize=None,
     )
-    cmd.ax_.get_images()[0].set_clim(0, 1)
+    # Remove empty lines corresponding to missed and Other classes
+    idx = np.sum(counts, axis=1) > 0
+    counts = counts[idx]
+    fractions = confusion_matrix(
+        y_true=matrix['true_class'],
+        y_pred=matrix['pred_class'],
+        sample_weight=matrix['n'],
+        normalize=norm,
+    )[idx]
+    annotations = conf_annotation(counts, fractions)
+    true_labels = np.vectorize(TAXONOMY.get)(np.unique(matrix['true_class']))
+    pred_labels = np.vectorize(TAXONOMY.get)(np.unique(matrix['pred_class']))
+    sns.heatmap(fractions,
+                cmap='Blues', vmin=0, vmax=1,
+                annot=annotations, fmt='s', annot_kws={"fontsize": 10},
+                xticklabels=pred_labels, yticklabels=true_labels)
+    for j, label in enumerate(true_labels):
+        i = np.where(pred_labels == label)[0][0]
+        plt.gca().add_patch(Rectangle((i, j), 1, 1, ec='black', fc='none', lw=2))
     plt.title(name)
     plt.savefig(f'{name}.pdf')
     plt.close()
@@ -185,12 +247,14 @@ def plot_matrix(matrix):
 
 def main(cli_args=None):
     args = parse_args(cli_args)
-    df = get_classifications(include_missed=args.include_missed)
+    logging.basicConfig(level=logging.INFO)
+    dfs = get_classifications(definition=args.definition, include_missed=args.include_missed)
     if args.save:
+        df = pd.concat(list(dfs.values()))
         df.to_csv('conf_matrices.csv', index=False)
     if args.plot:
-        for classifier_id, matrix in df.groupby('classifier_index'):
-            plot_matrix(matrix)
+        for classifier_id, matrix in dfs.items():
+            plot_matrix(matrix, norm=args.norm)
 
 
 
