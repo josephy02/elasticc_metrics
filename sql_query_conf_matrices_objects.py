@@ -222,14 +222,14 @@ def plot_matrix(matrix: pd.DataFrame, *, norm: str):
         normalize=None,
     )
     # Remove empty lines corresponding to missed and Other classes
-    idx = np.sum(counts, axis=1) > 0
-    counts = counts[idx]
+    idx = np.where(np.sum(counts, axis=1) > 0)[0], np.where(np.sum(counts, axis=0) > 0)[0]
+    counts = counts[idx[0], :][:, idx[1]]
     fractions = confusion_matrix(
         y_true=matrix['true_class'],
         y_pred=matrix['pred_class'],
         sample_weight=matrix['n'],
         normalize=norm,
-    )[idx]
+    )[idx[0], :][:, idx[1]]
     annotations = conf_annotation(counts, fractions)
     true_labels = np.vectorize(TAXONOMY.get)(np.unique(matrix['true_class']))
     pred_labels = np.vectorize(TAXONOMY.get)(np.unique(matrix['pred_class']))
@@ -238,7 +238,11 @@ def plot_matrix(matrix: pd.DataFrame, *, norm: str):
                 annot=annotations, fmt='s', annot_kws={"fontsize": 10},
                 xticklabels=pred_labels, yticklabels=true_labels)
     for j, label in enumerate(true_labels):
-        i = np.where(pred_labels == label)[0][0]
+        try:
+            i = np.where(pred_labels == label)[0].item()
+        except ValueError:
+            logging.warning(f'{label} not found in predictions for {name}')
+            continue
         plt.gca().add_patch(Rectangle((i, j), 1, 1, ec='black', fc='none', lw=2))
     plt.title(name)
     plt.savefig(f'{name}.pdf')
