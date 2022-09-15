@@ -4,8 +4,49 @@ import os
 from pprint import pformat
 from typing import Dict, List
 
+import numpy as np
 import pandas as pd
 import requests
+
+
+TAXONOMY = {
+    -1: 'missed',
+    0: 'Static/Other',
+    1: 'Non-Recurring',
+    2: 'Recurring',
+    20: 'Recurring/Other',
+    21: 'Periodic',
+    22: 'Non-Periodic',
+    210: 'Periodic/Other',
+    211: 'Cepheid',
+    212: 'RR Lyrae',
+    213: 'Delta Scuti',
+    214: 'EB',
+    215: 'LPV/Mira',
+    220: 'Non-Periodic/Other',
+    221: 'AGN',
+    10: 'Non-Recurring/Other',
+    11: 'SN-like',
+    12: 'Fast',
+    13: 'Long',
+    110: 'SN-like/Other',
+    111: 'Ia',
+    112: 'Ib/c',
+    113: 'II',
+    114: 'Iax',
+    115: '91bg',
+    120: 'Fast/Other',
+    121: 'KN',
+    122: 'M-dwarf Flare',
+    123: 'Dwarf Novae',
+    124: 'uLens',
+    130: 'Long/Other',
+    131: 'SLSN',
+    132: 'TDE',
+    133: 'ILOT',
+    134: 'CART',
+    135: 'PISN',
+}
 
 
 def parse_args(args=None):
@@ -74,11 +115,12 @@ def get_classifications(definition: str, include_missed: bool = False) -> Dict[s
     client = Client.from_credentials(username, password)
 
     query = f'''
-        SELECT * FROM elasticc_brokerclassifier ORDER BY "brokerName", "classifierName", "classifierId"
+        SELECT * FROM elasticc_brokerclassifier ORDER BY "brokerName", "brokerVersion", "classifierName", "classifierId"
     '''
     data = client(query)
     logging.info(pformat(data))
-    classifiers = {row['classifierId']: f'{row["brokerName"]} {row["classifierName"]}' for row in data}
+    classifiers = {row['classifierId']: f'{row["brokerName"]} {row["brokerVersion"]} {row["classifierName"]}'
+                   for row in data}
 
     if include_missed:
         best_last_join_type = 'LEFT'
@@ -148,21 +190,56 @@ def get_classifications(definition: str, include_missed: bool = False) -> Dict[s
     return dfs
 
 
+def _conf_annotation(count: int, fraction: float) -> str:
+    percent = np.round(fraction * 100)
+    if count < 1_000_000:
+        count_str = str(count)
+    else:
+        count_str = f'{count:.3g}'
+    return f'{percent}%\n{count_str}'
+
+
+conf_annotation = np.vectorize(_conf_annotation)
+
+
 def plot_matrix(matrix: pd.DataFrame, *, norm: str):
     import matplotlib.pyplot as plt
-    from sklearn.metrics import ConfusionMatrixDisplay
+    import seaborn as sns
+    from matplotlib.patches import Rectangle
+    from sklearn.metrics import confusion_matrix
 
-    plt.figure(figsize=(15, 15))
+    plt.figure(figsize=(20, 20))
+    plt.gca().set_aspect(
+        # aspect=len(np.unique(matrix['true_class'])) / len(np.unique(matrix['pred_class'])),
+        aspect='equal',
+        adjustable='box',
+    )
     name = matrix.iloc[0]['classifier_name']
-    cmd = ConfusionMatrixDisplay.from_predictions(
+    counts = confusion_matrix(
+        y_true=matrix['true_class'],
+        y_pred=matrix['pred_class'],
+        sample_weight=matrix['n'],
+        normalize=None,
+    )
+    # Remove empty lines corresponding to missed and Other classes
+    idx = np.sum(counts, axis=1) > 0
+    counts = counts[idx]
+    fractions = confusion_matrix(
         y_true=matrix['true_class'],
         y_pred=matrix['pred_class'],
         sample_weight=matrix['n'],
         normalize=norm,
-        ax=plt.gca(),
-        cmap='Blues',
-    )
-    cmd.ax_.get_images()[0].set_clim(0, 1)
+    )[idx]
+    annotations = conf_annotation(counts, fractions)
+    true_labels = np.vectorize(TAXONOMY.get)(np.unique(matrix['true_class']))
+    pred_labels = np.vectorize(TAXONOMY.get)(np.unique(matrix['pred_class']))
+    sns.heatmap(fractions,
+                cmap='Blues', vmin=0, vmax=1,
+                annot=annotations, fmt='s', annot_kws={"fontsize": 10},
+                xticklabels=pred_labels, yticklabels=true_labels)
+    for j, label in enumerate(true_labels):
+        i = np.where(pred_labels == label)[0][0]
+        plt.gca().add_patch(Rectangle((i, j), 1, 1, ec='black', fc='none', lw=2))
     plt.title(name)
     plt.savefig(f'{name}.pdf')
     plt.close()
