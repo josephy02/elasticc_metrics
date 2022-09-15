@@ -2,7 +2,7 @@ import argparse
 import logging
 import os
 from pprint import pformat
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -64,6 +64,7 @@ def parse_args(args=None):
                             "best" means having the largest probability over all classifier messages,
                             "last_best" means having the largest probability for the most recent alert
                         ''')
+    parser.add_argument('--classifier_id', type=int, help='consider a single classifier')
     return parser.parse_args(args)
 
 
@@ -109,8 +110,11 @@ class Client:
         return data['rows']
 
 
-def get_classifications(definition: str, include_missed: bool = False) -> Dict[str, pd.DataFrame]:
-    username = "kostya"
+def get_classifications(*,
+                        definition: str,
+                        classifier_id: Optional[int],
+                        include_missed: bool = False) -> Dict[str, pd.DataFrame]:
+    username = os.getenv("DESC_TOM_USERNAME", "kostya")
     password = os.getenv("DESC_TOM_PASSWORD")
     client = Client.from_credentials(username, password)
 
@@ -149,7 +153,10 @@ def get_classifications(definition: str, include_missed: bool = False) -> Dict[s
         raise ValueError(f'Unknown classification definition: {definition}')
 
     dfs = {}
-    for classifier_id, classifier_name in classifiers.items():
+    for classifier_id_, classifier_name in classifiers.items():
+        if classifier_id is not None and classifier_id != classifier_id_:
+            continue
+
         logging.info(f'Getting classifications for {classifier_name}')
         query = f'''
             SELECT best_last."classId" AS pred_class,
@@ -168,7 +175,7 @@ def get_classifications(definition: str, include_missed: bool = False) -> Dict[s
                   ON elasticc_brokerclassification."brokerMessageId"=elasticc_brokermessage."brokerMessageId"
                INNER JOIN elasticc_diaalert
                   ON elasticc_brokermessage."alertId"=elasticc_diaalert."alertId"
-               WHERE elasticc_brokerclassification."classifierId"={classifier_id}
+               WHERE elasticc_brokerclassification."classifierId"={classifier_id_}
                ORDER BY elasticc_diaalert."diaObjectId", {distinct_order} DESC
             ) best_last
             ON (best_last."diaObjectId" = elasticc_diaobjecttruth."diaObjectId")
@@ -182,10 +189,10 @@ def get_classifications(definition: str, include_missed: bool = False) -> Dict[s
             logging.warning(f'No data for {classifier_name}')
             continue
         df = pd.DataFrame.from_records(data)
-        df['classifier_id'] = classifier_id
+        df['classifier_id'] = classifier_id_
         df['classifier_name'] = classifier_name
         df['pred_class'] = df['pred_class'].fillna(-1).astype(int)
-        dfs[classifier_id] = df
+        dfs[classifier_id_] = df
 
     return dfs
 
@@ -214,6 +221,8 @@ def plot_matrix(matrix: pd.DataFrame, *, norm: str):
         aspect='equal',
         adjustable='box',
     )
+    plt.xlabel('Predicted class')
+    plt.ylabel('True class')
     name = matrix.iloc[0]['classifier_name']
     counts = confusion_matrix(
         y_true=matrix['true_class'],
@@ -252,7 +261,8 @@ def plot_matrix(matrix: pd.DataFrame, *, norm: str):
 def main(cli_args=None):
     args = parse_args(cli_args)
     logging.basicConfig(level=logging.INFO)
-    dfs = get_classifications(definition=args.definition, include_missed=args.include_missed)
+    dfs = get_classifications(definition=args.definition, classifier_id=args.classifier_id,
+                              include_missed=args.include_missed)
     if args.save:
         df = pd.concat(list(dfs.values()))
         df.to_csv('conf_matrices.csv', index=False)
