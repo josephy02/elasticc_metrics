@@ -221,8 +221,6 @@ def plot_matrix(matrix: pd.DataFrame, *, norm: str):
         aspect='equal',
         adjustable='box',
     )
-    plt.xlabel('Predicted class')
-    plt.ylabel('True class')
     name = matrix.iloc[0]['classifier_name']
     counts = confusion_matrix(
         y_true=matrix['true_class'],
@@ -254,6 +252,8 @@ def plot_matrix(matrix: pd.DataFrame, *, norm: str):
             continue
         plt.gca().add_patch(Rectangle((i, j), 1, 1, ec='black', fc='none', lw=2))
     plt.title(name)
+    plt.xlabel('Predicted class')
+    plt.ylabel('True class')
     plt.savefig(f'{name}.pdf')
     plt.close()
 
