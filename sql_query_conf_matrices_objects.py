@@ -260,7 +260,7 @@ def plot_matrix(matrix: pd.DataFrame, *, norm: str):
 
 def main(cli_args=None):
     args = parse_args(cli_args)
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format='[%(asctime)s - %(levelname)s] %(message)s' )
     dfs = get_classifications(definition=args.definition, classifier_id=args.classifier_id,
                               include_missed=args.include_missed)
     if args.save:
