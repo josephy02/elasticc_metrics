@@ -30,19 +30,6 @@ def parse_args(args=None):
     return parser.parse_args(args)
 
 
-# def _conf_annotation(count: int, fraction: float) -> str:
-@np.vectorize
-def conf_annotation(count: int, fraction: float) -> str:
-    percent = np.round(fraction * 100)
-    if count < 1_000_000:
-        count_str = str(count)
-    else:
-        count_str = f'{count:.3g}'
-    return f'{percent}%\n{count_str}'
-
-# conf_annotation = np.vectorize(_conf_annotation)
-
-
 class Client:
     url = "https://desc-tom.lbl.gov"
 
@@ -188,6 +175,15 @@ class Client:
         return dfs
 
 
+    @np.vectorize
+    def conf_annotation(count: int, fraction: float) -> str:
+        percent = np.round(fraction * 100)
+        if count < 1_000_000:
+            count_str = str(count)
+        else:
+            count_str = f'{count:.3g}'
+        return f'{percent}%\n{count_str}'
+
     def plot_matrix(self, matrix: pd.DataFrame, *, norm: str, extension:str="pdf" ):
         import matplotlib.pyplot as plt
         import seaborn as sns
@@ -216,7 +212,7 @@ class Client:
             sample_weight=matrix['n'],
             normalize=norm,
         )[idx[0], :][:, idx[1]]
-        annotations = conf_annotation(counts, fractions)
+        annotations = self.conf_annotation(counts, fractions)
         true_labels = np.vectorize(self.taxonomy.get)(np.unique(matrix['true_class']))
         pred_labels = np.vectorize(self.taxonomy.get)(np.unique(matrix['pred_class']))
         sns.heatmap(fractions,
