@@ -30,7 +30,7 @@ def parse_args(args=None):
     return parser.parse_args(args)
 
 
-class Client:
+class ConfMatrixClient:
     url = "https://desc-tom.lbl.gov"
 
     @classmethod
@@ -239,7 +239,7 @@ def main(cli_args=None):
     logging.basicConfig(level=logging.INFO, format='[%(asctime)s - %(levelname)s] %(message)s' )
     username = os.getenv("DESC_TOM_USERNAME", "kostya")
     password = os.getenv("DESC_TOM_PASSWORD")
-    client = Client.from_credentials(username, password)
+    client = ConfMatrixClient.from_credentials(username, password)
     dfs = client.get_classifications(definition=args.definition, classifier_id=args.classifier_id,
                                      include_missed=args.include_missed)
     if args.save:
