@@ -7,6 +7,10 @@ in this archive, or
 [`sql_query_tom_db.py`](https://github.com/LSSTDESC/tom_desc/blob/main/sql_query_tom_db.py)
 from the DESC TOM's github archive.  The latter file also has the relevant elasticc database schema.
 
+### Probabilistic metrics
+
+There is a database view, `elasticc_view_classifications_probmetrics`, that holds histograms of classification probabilities.  This view took a very long time to generate, but is fast to query (you can pull the whole table down in several seconds).  To use it, see `metric_querier.py`, and as an example, `avg_prob_vs_class_and_time.ipynb`.
+
 ### Confusion matrices
 
 [`sql_query_conf_matrices_objects.py`](https://github.com/LSSTDESC/elasticc_metrics/blob/main/sql_query_conf_matrices_objects.py)
