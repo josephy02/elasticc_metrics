@@ -186,7 +186,7 @@ class ConfMatrixClient:
             count_str = f'{count:.3g}'
         return f'{percent}%\n{count_str}'
 
-    def plot_matrix(self, matrix: pd.DataFrame, *, norm: str, extension:str="pdf" ):
+    def plot_matrix(self, matrix: pd.DataFrame, *, norm: str, extension:str="pdf", show:bool=False ):
         import matplotlib.pyplot as plt
         import seaborn as sns
         from matplotlib.patches import Rectangle
@@ -232,9 +232,11 @@ class ConfMatrixClient:
         plt.xlabel('Predicted class')
         plt.ylabel('True class')
         plt.tight_layout()
-        plt.savefig(f'{name}.{extension}')
+        if extension is not None:
+            plt.savefig(f'{name}.{extension}')
+        if show:
+            plt.show()
         plt.close()
-
 
 def main(cli_args=None):
     args = parse_args(cli_args)
